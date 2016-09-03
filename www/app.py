@@ -88,18 +88,23 @@ async def response_factory(app, handler):
         r = await handler(request)
         if isinstance(r, web.StreamResponse):
             return r
+        # 若响应结果为字节流,则将其作为应答的body部分,并设置响应类型为流型
         if isinstance(r, bytes):
             resp = web.Response(body=r)
             resp.content_type = 'application/octet-stream'
             return resp
         if isinstance(r, str):
             if r.startswith('redirect:'):
+            # 判断响应结果是否为重定向.若是,则返回重定向的地址
                 return web.HTTPFound(r[9:])
+            # 响应结果不是重定向,则以utf-8对字符串进行编码,作为body.设置相应的响应类型
             resp = web.Response(body=r.encode('utf-8'))
             resp.content_type = 'text/html;charset=utf-8'
             return resp
+     # 若响应结果为字典,则获取它的模板属性
         if isinstance(r, dict):
             template = r.get('__template__')
+            # 若不存在对应模板,则将字典调整为json格式返回,并设置响应类型为json
             if template is None:
                 resp = web.Response(body=json.dumps(r, ensure_ascii=False, default=lambda o: o.__dict__).encode('utf-8'))
                 resp.content_type = 'application/json;charset=utf-8'
@@ -108,19 +113,26 @@ async def response_factory(app, handler):
                 resp = web.Response(body=app['__templating__'].get_template(template).render(**r).encode('utf-8'))
                 resp.content_type = 'text/html;charset=utf-8'
                 return resp
+        # 若响应结果为整型的
+        # 此时r为状态码,即404,500等
         if isinstance(r, int) and r >= 100 and r < 600:
             return web.Response(r)
         if isinstance(r, tuple) and len(r) == 2:
             t, m = r
+            # t为http状态码,m为错误描述
+            # 判断t是否满足100~600的条件
             if isinstance(t, int) and t >= 100 and t < 600:
                 return web.Response(t, str(m))
+        # 默认以字符串形式返回响应结果,设置类型为普通文本
         # default:
         resp = web.Response(body=str(r).encode('utf-8'))
         resp.content_type = 'text/plain;charset=utf-8'
         return resp
     return response
 
+# 时间过滤器
 def datetime_filter(t):
+    # 定义时间差
     delta = int(time.time() - t)
     if delta < 60:
         return u'1分钟前'
@@ -134,17 +146,23 @@ def datetime_filter(t):
     return u'%s年%s月%s日' % (dt.year, dt.month, dt.day)
 
 async def init(loop):
+    # 创建全局数据库连接池
     await orm.create_pool(loop=loop, host='127.0.0.1', port=3306, user='www', password='www', db='awesome')
+    # 创建web应用,
     app = web.Application(loop=loop, middlewares=[
         logger_factory, response_factory
-    ])
+    ]) # 创建一个循环类型是消息循环的web应用对象
+    # 设置模板为jiaja2, 并以时间为过滤器
     init_jinja2(app, filters=dict(datetime=datetime_filter))
+   # 注册所有url处理函数
     add_routes(app, 'handlers')
+    # 将当前目录下的static目录加入app目录
     add_static(app)
+    # 调用子协程:创建一个TCP服务器,绑定到"127.0.0.1:9000"socket,并返回一个服务器对象
     srv = await loop.create_server(app.make_handler(), '127.0.0.1', 9000)
     logging.info('server started at http://127.0.0.1:9000...')
     return srv
 
-loop = asyncio.get_event_loop()
-loop.run_until_complete(init(loop))
+loop = asyncio.get_event_loop()# loop是一个消息循环对象
+loop.run_until_complete(init(loop)) #在消息循环中执行协程
 loop.run_forever()
