@@ -7,7 +7,7 @@ import re, time, json, logging, hashlib, base64, asyncio
 from coroweb import get, post
 
 from models import User, Comment, Blog, next_id
-from apis import APIResourceNotFoundError, APIValueError, APIError, APIPermissionError
+from apis import APIResourceNotFoundError, APIValueError, APIError, APIPermissionError, Page
 from config import configs
 
 
@@ -100,18 +100,22 @@ async def index(request):
         'blogs': blogs
     }
 
+# 返回注册页面
 @get('/register')
 def register():
     return{
         '__template__': 'register.html'
     }
 
+
+# 返回登录页面
 @get('/signin')
 def signin():
     return{
         '__template__': 'signin.html'
     }
 
+# 用户登出
 @get('/signout')
 def signout(request):
     # 请求头部的referer,表示从哪里链接到当前页面,即上一个页面
@@ -196,6 +200,11 @@ def api_register_user(*,name, email, passwd): # 注册信息包括用户名,邮�
     # json.dumps方法将对象序列化为json格式
     r.body = json.dumps(user, ensure_ascii=False).encode('utf-8')
     return r
+
+
+@get('/api/blogs/{id}')
+def api_get_blog(*, id):
+    blog = yield from Blog.find(id)
 
 # API: 用户验证
 @post("/api/authenticate")

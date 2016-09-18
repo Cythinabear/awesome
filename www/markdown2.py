@@ -2316,6 +2316,7 @@ def main(argv=None):
     if opts.self_test:
         return _test()
 
+
     if opts.extras:
         extras = {}
         for s in opts.extras:

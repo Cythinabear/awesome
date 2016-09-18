@@ -1,4 +1,8 @@
 # Web App需要的3个表用Model表示出来
+'''
+Models for user, blog, comment.
+'''
+
 import time, uuid
 
 from orm import Model, StringField, BooleanField, FloatField, TextField
