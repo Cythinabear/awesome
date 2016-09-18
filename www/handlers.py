@@ -21,6 +21,22 @@ _COOKIE_KEY = configs.session.secret   # cookie密钥,作为加密cookie的原�
 _RE_EMAIL = re.compile(r'^[a-z0-9\.\-\_]+\@[a-z0-9\-\_]+(\.[a-z0-9\-\_]+){1,4}$')
 _RE_SHA1 = re.compile(r'[0-9a-f]{40}$')
 
+def check_admin(request):
+    if request.__user__ is None or not request.__user__.admin:
+        raise APIPermissionError()
+
+#取得页码
+def get_page_index(page_str):
+    # 将传入的字符串转为页码信息, 实际只是对传入的字符串做了合法性检查
+    p = 1
+    try:
+        p = int(page_str)
+    except ValueError as e:
+        pass
+    if p < 1:
+        p = 1
+    return p
+
 def user2cookie(user, max_age):
     '''Generate cookies str by user.'''
     # build cookie string by: id-expires-sha1
@@ -31,9 +47,16 @@ def user2cookie(user, max_age):
     L = [user.id, expires, hashlib.sha1(s.encode("utf-8")).hexdigest()]
     return "-".join(L) 
 
+# 文本转html
+def text2html(text):
+    '''文本转html'''
+    # 先用filter函数对输入的文本进行过滤处理: 断行,去首尾空白字符
+    # 再用map函数对特殊符号进行转换,在将字符串装入html的<p>标签中
+    lines = map(lambda s: '<p>%s</p>' % s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'), filter(lambda s: s.strip() != '', text.split('\n')))
+    return ''.join(lines)
+
 # 解密cookie
-@asyncio.coroutine
-def cookie2user(cookie_str):
+async def cookie2user(cookie_str):
     '''Parse cookie and load user if cookie is valid'''
     # cookie_str就是user2cookie函数的返回值
     if not cookie_str:
@@ -116,6 +139,23 @@ async def api_get_users():
     # 以dict形式返回,并且未指定__template__,将被app.py的response factory处理为json
     return dict(page=p, users=users)
 
+# 博客详情页
+@get('/blog/{id}')
+def get_blog(id):
+    blog = yield from Blog.find(id) # 通过id从数据库拉取博客信息
+    # 从数据库拉取指定blog的全部评论,按时间降序排序,即最新的排在最前
+    comments = yield from Comment.findAll('blog_id=?', [id], orderBy='created_at desc')
+    # 将每条评论都转化为html格式(根据text2html代码可知,实际为html的<p>)
+    for c in comments:
+        c.html_content = text2html(c.content)
+    blog.html_content = markdown2.markdown(blog.content) # blog是markdown格式,将其转换为html格式
+    return {
+        # 返回的参数将在jinja2模板中被解析
+        "__template__": "blog.html",
+        "blog": blog,
+        "comments": comments
+    }
+
 # API: 创建用户
 @post('/api/users')
 def api_register_user(*,name, email, passwd): # 注册信息包括用户名,邮箱与密码
@@ -189,3 +229,38 @@ def authenticate(*, email, passwd): # 通过邮箱与密码验证登录
     r.content_type = "application/json"
     r.body = json.dumps(user, ensure_ascii=False).encode("utf-8")
     return r
+
+# 写博客的页面
+@get('/manage/blogs/create')
+def manage_create_blog():
+    return {
+        "__template__": "manage_blog_edit.html",
+        'id': '',    # id的值将传给js变量I
+        # action的值也将传给js变量action
+        # 将在用户提交博客的时候,将数据post到action指定的路径,此处即为创建博客的api
+        'action': '/api/blogs'
+    }
+
+# 修改博客的页面
+@get('/manage/blogs/edit')
+def manage_edit_blog(*, id):
+    return {
+        "__template__": "manage_blog_edit.html",
+        'id': id,    # id的值将传给js变量I
+        # action的值也将传给js变量action
+        # 将在用户提交博客的时候,将数据post到action指定的路径,此处即为创建博客的api
+        'action': '/api/blogs/%s' % id
+    }
+
+@post('/api/blogs')
+def api_create_blog(request, *, name, summary, content):
+    check_admin(request)
+    if not name or not name.strip():
+        raise APIValueError('name', 'name cannot be empty.')
+    if not summary or not summary.strip():
+        raise APIValueError('summary', 'summary cannot be empty.')
+    if not content or not content.strip():
+        raise APIValueError('content', 'content cannot be empty.')
+    blog = Blog(user_id=request.__user__.id, user_name=request.__user__.name, user_image=request.__user__.image, name=name.strip(), summary=summary.strip(), content=content.strip())
+    yield from blog.save()
+    return blog

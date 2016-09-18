@@ -8,6 +8,8 @@ from urllib import parse
 
 from aiohttp import web
 
+from apis import APIError
+
 # 定义@get()
 
 def get(path):
