@@ -4,7 +4,8 @@ __author__ = 'Cythina bear'
 
 import re, time, json, logging, hashlib, base64, asyncio
 
-from coroweb import get, post
+from coroweb import get, post # 导入装饰器,这样就能很方便的生成request handler
+from aiohttp import web
 
 from models import User, Comment, Blog, next_id
 from apis import APIResourceNotFoundError, APIValueError, APIError, APIPermissionError, Page
@@ -69,7 +70,7 @@ async def cookie2user(cookie_str):
         uid, expires, sha1 = L
         if int(expires) < time.time(): # 时间是浮点表示的时间戳,一直在增大.因此失效时间小于当前时间,说明cookie已失效
             return None
-        user = yield from User.find(uid)  # 在拆分得到的id在数据库中查找用户信息
+        user = await User.find(uid)  # 在拆分得到的id在数据库中查找用户信息
         if user is None:
             return None
         # 利用用户id,加密后的密码,失效时间,加上cookie密钥,组合成待加密的原始字符串
@@ -145,10 +146,10 @@ async def api_get_users():
 
 # 博客详情页
 @get('/blog/{id}')
-def get_blog(id):
-    blog = yield from Blog.find(id) # 通过id从数据库拉取博客信息
+async def get_blog(id):
+    blog = await Blog.find(id) # 通过id从数据库拉取博客信息
     # 从数据库拉取指定blog的全部评论,按时间降序排序,即最新的排在最前
-    comments = yield from Comment.findAll('blog_id=?', [id], orderBy='created_at desc')
+    comments = await Comment.findAll('blog_id=?', [id], orderBy='created_at desc')
     # 将每条评论都转化为html格式(根据text2html代码可知,实际为html的<p>)
     for c in comments:
         c.html_content = text2html(c.content)
@@ -160,61 +161,45 @@ def get_blog(id):
         "comments": comments
     }
 
-# API: 创建用户
-@post('/api/users')
-def api_register_user(*,name, email, passwd): # 注册信息包括用户名,邮箱与密码
-    # 验证输入的正确性
-    if not name or not name.strip():
-        raise APIValueError("name")
-    if not email or not _RE_EMAIL.match(email):
-        raise APIValueError("email")
-    if not passwd or not _RE_SHA1.match(passwd):
-        raise APIValueError("passwd")
-    # 在数据库里查看是否已存在该email
-    users = yield from User.findAll('email=?', [email]) # mysql parameters are listed in list
-    if len(users) > 0: # findAll的结果不为0,说明数据库已存在同名email,抛出异常报错
-        raise APIError('register:failed', 'email', 'Email is already in use.')
+# 管理重定向
+@get("/manage/")
+def manage():
+    return "redirect:/manage/comments"
 
-    # 数据库内无相应的email信息,说明是第一次注册
-    uid = next_id() # 利用当前时间与随机生成的uuid生成user id
-    sha1_passwd = '%s:%s' % (uid, passwd) # 将user id与密码的组合赋给sha1_passwd变量
-    # 创建用户对象, 其中密码并不是用户输入的密码,而是经过复杂处理后的保密字符串
-    # unicode对象在进行哈希运算之前必须先编码
-    # sha1(secure hash algorithm),是一种不可逆的安全算法.这在一定程度上保证了安全性,因为用户密码只有用户一个人知道
-    # hexdigest()函数将hash对象转换成16进制表示的字符串
-    user = User(id=uid, name=name.strip(), email=email, passwd=hashlib.sha1(sha1_passwd.encode('utf-8')).hexdigest(), image="http://www.gravatar.com/avatar/%s?d=mm&s=120" % hashlib.md5(email.encode('utf-8')).hexdigest())
-    yield from user.save() # 将用户信息储存到数据库中,save()方法封装的实际是数据库的insert操作
+# 管理博客的页面
+@get('/manage/blogs')
+def manage_blogs(*, page='1'):  # 管理页面默认从"1"开始
+    return {
+        "__template__": "manage_blogs.html",
+        "page_index": get_page_index(page)  #通过page_index来显示分页
+    }
 
-    # 这其实还是一个handler,因此需要返回response. 此时返回的response是带有cookie的响应
-    r = web.Response()
-    # 刚创建的的用户设置cookiei(网站为了辨别用户身份而储存在用户本地终端的数据)
-    # http协议是一种无状态的协议,即服务器并不知道用户上一次做了什么.
-    # 因此服务器可以通过设置或读取Cookies中包含信息,借此维护用户跟服务器会话中的状态
-    # user2cookie设置的是cookie的值
-    # max_age是cookie的最大存活周期,单位是秒.当时间结束时,客户端将抛弃该cookie.之后需要重新登录
-    r.set_cookie(COOKIE_NAME, user2cookie(user, 600), max_age=600, httponly=True)  # 设置cookie最大存会时间为10min
-    # r.set_cookie(COOKIE_NAME, user2cookie(user, 86400), max_age=86400, httponly=True)  #86400s=24h
-    user.passwd = '*****' # 修改密码的外部显示为*
-    # 设置content_type,将在data_factory中间件中继续处理
-    r.content_type = 'application/json'
-    # json.dumps方法将对象序列化为json格式
-    r.body = json.dumps(user, ensure_ascii=False).encode('utf-8')
-    return r
-
+# API: 获取blog
+@get('/api/blogs')
+async def api_blogs(*, page='1'):
+    page_index = get_page_index(page)
+    num = await Blog.findNumber('count(id)')  # num为博客总数
+    p = Page(num, page_index) # 创建page对象
+    if num == 0:
+        return dict(page=p, blogs=())  # 若博客数为0,返回字典,将被app.py的response中间件再处理
+    # 博客总数不为0,则从数据库中抓取博客
+    # limit强制select语句返回指定的记录数,前一个参数为偏移量,后一个参数为记录的最大数目
+    blogs = await Blog.findAll(orderBy="created_at desc", limit=(p.offset, p.limit))
+    return dict(page=p, blogs=blogs)  # 返回字典,以供response中间件处理
 
 @get('/api/blogs/{id}')
-def api_get_blog(*, id):
-    blog = yield from Blog.find(id)
+async def api_get_blog(*, id):
+    blog = await Blog.find(id)
 
 # API: 用户验证
 @post("/api/authenticate")
-def authenticate(*, email, passwd): # 通过邮箱与密码验证登录
+async def authenticate(*, email, passwd): # 通过邮箱与密码验证登录
     # 验证邮箱与密码的合法性
     if not email:
         raise APIValueError("email", "Invalid email")
     if not passwd:
         raise APIValueError("passwd", "Invalid password")
-    users = yield from User.findAll("email=?", [email]) # 在数据库中查找email,将以list形式返回
+    users = await User.findAll("email=?", [email]) # 在数据库中查找email,将以list形式返回
     if len(users) == 0: # 查询结果为空,即数据库中没有相应的email记录,说明用户不存在
         raise APIValueError("email", "Email not exits")
     user = users[0] # 取得用户记录.事实上,就只有一条用户记录,只不过返回的是list
@@ -261,15 +246,61 @@ def manage_edit_blog(*, id):
         'action': '/api/blogs/%s' % id
     }
 
+
+
+# API: 创建blog
 @post('/api/blogs')
-def api_create_blog(request, *, name, summary, content):
-    check_admin(request)
+async def api_create_blog(request, *, name, summary, content):
+    check_admin(request) # 检查用户权限
+    # 验证博客信息的合法性
     if not name or not name.strip():
-        raise APIValueError('name', 'name cannot be empty.')
+        raise APIValueError("name", "name cannot be empty")
     if not summary or not summary.strip():
-        raise APIValueError('summary', 'summary cannot be empty.')
+        raise APIValueError("summary", "summary cannot be empty")
     if not content or not content.strip():
-        raise APIValueError('content', 'content cannot be empty.')
-    blog = Blog(user_id=request.__user__.id, user_name=request.__user__.name, user_image=request.__user__.image, name=name.strip(), summary=summary.strip(), content=content.strip())
-    yield from blog.save()
-    return blog
+        raise APIValueError("content", "content cannot be empty")
+    # 创建博客对象
+    blog = Blog(user_id=request.__user__.id, user_name=request.__user__.name, user_image=request.__user__.image, name=name.strip(),summary=summary.strip(), content=content.strip())
+    await blog.save() # 储存博客入数据库
+    return blog # 返回博客信息
+
+# API: 创建用户
+@post('/api/users')
+async def api_register_user(*,name, email, passwd): # 注册信息包括用户名,邮箱与密码
+    # 验证输入的正确性
+    if not name or not name.strip():
+        raise APIValueError("name")
+    if not email or not _RE_EMAIL.match(email):
+        raise APIValueError("email")
+    if not passwd or not _RE_SHA1.match(passwd):
+        raise APIValueError("passwd")
+    # 在数据库里查看是否已存在该email
+    users = await User.findAll('email=?', [email]) # mysql parameters are listed in list
+    if len(users) > 0: # findAll的结果不为0,说明数据库已存在同名email,抛出异常报错
+        raise APIError('register:failed', 'email', 'Email is already in use.')
+
+    # 数据库内无相应的email信息,说明是第一次注册
+    uid = next_id() # 利用当前时间与随机生成的uuid生成user id
+    sha1_passwd = '%s:%s' % (uid, passwd) # 将user id与密码的组合赋给sha1_passwd变量
+    # 创建用户对象, 其中密码并不是用户输入的密码,而是经过复杂处理后的保密字符串
+    # unicode对象在进行哈希运算之前必须先编码
+    # sha1(secure hash algorithm),是一种不可逆的安全算法.这在一定程度上保证了安全性,因为用户密码只有用户一个人知道
+    # hexdigest()函数将hash对象转换成16进制表示的字符串
+    user = User(id=uid, name=name.strip(), email=email, passwd=hashlib.sha1(sha1_passwd.encode('utf-8')).hexdigest(), image="http://www.gravatar.com/avatar/%s?d=mm&s=120" % hashlib.md5(email.encode('utf-8')).hexdigest())
+    await user.save() # 将用户信息储存到数据库中,save()方法封装的实际是数据库的insert操作
+
+    # 这其实还是一个handler,因此需要返回response. 此时返回的response是带有cookie的响应
+    r = web.Response()
+    # 刚创建的的用户设置cookiei(网站为了辨别用户身份而储存在用户本地终端的数据)
+    # http协议是一种无状态的协议,即服务器并不知道用户上一次做了什么.
+    # 因此服务器可以通过设置或读取Cookies中包含信息,借此维护用户跟服务器会话中的状态
+    # user2cookie设置的是cookie的值
+    # max_age是cookie的最大存活周期,单位是秒.当时间结束时,客户端将抛弃该cookie.之后需要重新登录
+    r.set_cookie(COOKIE_NAME, user2cookie(user, 600), max_age=600, httponly=True)  # 设置cookie最大存会时间为10min
+    # r.set_cookie(COOKIE_NAME, user2cookie(user, 86400), max_age=86400, httponly=True)  #86400s=24h
+    user.passwd = '*****' # 修改密码的外部显示为*
+    # 设置content_type,将在data_factory中间件中继续处理
+    r.content_type = 'application/json'
+    # json.dumps方法将对象序列化为json格式
+    r.body = json.dumps(user, ensure_ascii=False).encode('utf-8')
+    return r
